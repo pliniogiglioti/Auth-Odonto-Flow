@@ -59,7 +59,7 @@ function stripLogoutParam(urlStr: string) {
   }
 }
 
-// Se vier returnTo dentro do returnTo (seu caso), pega o mais interno
+// Se vier returnTo dentro do returnTo, pega o mais interno
 function normalizeReturnTo(rawReturnTo: string | null) {
   const first = safeReturnTo(rawReturnTo);
 
@@ -99,16 +99,85 @@ function clearSupabaseStorageKeys() {
     for (const k of Object.keys(localStorage)) {
       if (k.startsWith("sb-")) localStorage.removeItem(k);
     }
-  } catch {
-    // ignore
-  }
+  } catch {}
   try {
     for (const k of Object.keys(sessionStorage)) {
       if (k.startsWith("sb-")) sessionStorage.removeItem(k);
     }
-  } catch {
-    // ignore
+  } catch {}
+}
+
+/** =========================
+ * Compat Supabase Auth (v1/v2) sem quebrar TS
+ * ========================= */
+const auth: any = (supabase as any)?.auth ?? (supabase as any);
+
+async function getSessionCompat() {
+  // v2: auth.getSession()
+  if (typeof auth.getSession === "function") {
+    const res = await auth.getSession();
+    return res?.data?.session ?? null;
   }
+  // v1: auth.session()
+  if (typeof auth.session === "function") {
+    return auth.session() ?? null;
+  }
+  return null;
+}
+
+async function validateSessionServerCompat() {
+  // v2: auth.getUser() valida no servidor (mata loop de token podre)
+  if (typeof auth.getUser === "function") {
+    const { error } = await auth.getUser();
+    return !error;
+  }
+  // se não existir getUser, NÃO tenta auto-redirect no boot (mais seguro)
+  return false;
+}
+
+async function signOutCompat() {
+  // v2: auth.signOut({ scope })
+  if (typeof auth.signOut === "function") {
+    try {
+      await auth.signOut({ scope: "local" });
+      return;
+    } catch {
+      await auth.signOut();
+      return;
+    }
+  }
+}
+
+async function signInPasswordCompat(email: string, password: string) {
+  // v2
+  if (typeof auth.signInWithPassword === "function") {
+    return await auth.signInWithPassword({ email, password });
+  }
+  // v1
+  if (typeof auth.signIn === "function") {
+    return await auth.signIn({ email, password });
+  }
+  return { error: { message: "Método de login não disponível (supabase auth)" } };
+}
+
+async function signInOAuthCompat(provider: "google" | "facebook" | "apple", redirectTo: string) {
+  // v2
+  if (typeof auth.signInWithOAuth === "function") {
+    return await auth.signInWithOAuth({ provider, options: { redirectTo } });
+  }
+  // v1
+  if (typeof auth.signIn === "function") {
+    return await auth.signIn({ provider }, { redirectTo });
+  }
+  return { error: { message: "OAuth não disponível (supabase auth)" } };
+}
+
+function onAuthStateChangeCompat(cb: (event: string, session: any) => void) {
+  if (typeof auth.onAuthStateChange !== "function") return () => {};
+
+  const res = auth.onAuthStateChange((event: any, session: any) => cb(event, session));
+  const sub = res?.data?.subscription ?? res?.subscription ?? null;
+  return () => sub?.unsubscribe?.();
 }
 
 export default function App() {
@@ -122,25 +191,17 @@ export default function App() {
 
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const rawReturnTo = useMemo(() => params.get("returnTo"), [params]);
-
   const returnTo = useMemo(() => normalizeReturnTo(rawReturnTo), [rawReturnTo]);
 
   const isLogout = useMemo(() => {
-    // 1) logout direto por query
     if (truthyParam(params.get("logout"))) return true;
-
-    // 2) caso ainda exista /logout (se o SPA route funcionar)
     if (window.location.pathname === "/logout") return true;
 
-    // 3) logout “escondido” dentro do returnTo (seu caso)
     try {
       const u = new URL(safeReturnTo(rawReturnTo));
       if (truthyParam(u.searchParams.get("logout"))) return true;
-    } catch {
-      // ignore
-    }
+    } catch {}
 
-    // 4) fallback bruto (se vier encoded)
     const raw = rawReturnTo ?? "";
     if (raw.includes("logout%3D1") || raw.includes("logout=1")) return true;
 
@@ -152,8 +213,6 @@ export default function App() {
     if (redirecting) return;
 
     const base = stripHash(stripTokenHash(returnTo));
-
-    // trava anti-loop: se o returnTo for a própria página do auth
     if (isSamePage(base)) {
       setBooting(false);
       return;
@@ -170,7 +229,7 @@ export default function App() {
   };
 
   /** =========================
-   * LOGOUT (à prova de returnTo aninhado)
+   * LOGOUT
    * ========================= */
   useEffect(() => {
     if (!isLogout) return;
@@ -178,21 +237,16 @@ export default function App() {
     (async () => {
       setRedirecting(true);
 
-      try {
-        await supabase.auth.signOut({ scope: "global" as any });
-      } catch {
-        await supabase.auth.signOut();
-      }
-
+      await signOutCompat();
       clearSupabaseStorageKeys();
 
       const clean = stripHash(stripTokenHash(stripLogoutParam(returnTo)));
-      window.location.replace(clean);
+      window.location.replace(isSamePage(clean) ? "/" : clean);
     })();
   }, [isLogout, returnTo]);
 
   /** =========================
-   * Boot: checa sessão antes de renderizar login (tira pisca)
+   * Boot: só redireciona se validar sessão no servidor (evita loop)
    * ========================= */
   useEffect(() => {
     if (isLogout) return;
@@ -201,28 +255,47 @@ export default function App() {
     setBooting(true);
 
     (async () => {
-      const { data } = await supabase.auth.getSession();
+      const session = await getSessionCompat();
       if (!mounted) return;
 
-      if (data.session) {
-        redirectToAppWithSession(data.session);
-        return;
+      if (session) {
+        const ok = await validateSessionServerCompat();
+        if (!mounted) return;
+
+        if (ok) {
+          redirectToAppWithSession(session);
+          return;
+        }
+
+        // sessão do auth tá podre -> limpa e mostra login
+        await signOutCompat();
+        clearSupabaseStorageKeys();
       }
 
       setBooting(false);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange((event: any, session) => {
-      if (session) {
-        redirectToAppWithSession(session);
+    const unsub = onAuthStateChangeCompat(async (event, session) => {
+      // só redireciona em login/token novo
+      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
+        const ok = await validateSessionServerCompat();
+        if (ok && session) redirectToAppWithSession(session);
+        else {
+          await signOutCompat();
+          clearSupabaseStorageKeys();
+          setBooting(false);
+        }
         return;
       }
-      if (event === "INITIAL_SESSION") setBooting(false);
+
+      if (event === "INITIAL_SESSION" || event === "SIGNED_OUT") {
+        setBooting(false);
+      }
     });
 
     return () => {
       mounted = false;
-      sub.subscription.unsubscribe();
+      unsub();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [returnTo, isLogout]);
@@ -230,23 +303,20 @@ export default function App() {
   /** =========================
    * OAuth
    * ========================= */
-    const loginOAuth = async (provider: "google" | "facebook" | "apple") => {
-      setIsLoading(true);
-      setErrorMsg(null);
+  const loginOAuth = async (provider: "google" | "facebook" | "apple") => {
+    setIsLoading(true);
+    setErrorMsg(null);
 
-      const cleanReturnTo = stripTokenHash(returnTo);
-      const redirectBack = `${window.location.origin}/?returnTo=${encodeURIComponent(cleanReturnTo)}`;
+    const cleanReturnTo = stripTokenHash(returnTo);
+    const redirectBack = `${window.location.origin}/?returnTo=${encodeURIComponent(cleanReturnTo)}`;
 
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider,
-        options: { redirectTo: redirectBack },
-      });
+    const { error } = await signInOAuthCompat(provider, redirectBack);
 
-      if (error) {
-        setErrorMsg(error.message);
-        setIsLoading(false);
-      }
-    };
+    if (error) {
+      setErrorMsg(error.message);
+      setIsLoading(false);
+    }
+  };
 
   /** =========================
    * Email + senha
@@ -261,10 +331,7 @@ export default function App() {
     }
 
     setIsLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({
-      email: formData.email,
-      password: formData.password,
-    });
+    const { error } = await signInPasswordCompat(formData.email, formData.password);
     setIsLoading(false);
 
     if (error) {
