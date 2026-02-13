@@ -340,7 +340,6 @@ export default function App() {
                     type={showPassword ? "text" : "password"}
                     placeholder="••••••••"
                     value={formData.password}
-                    linked={undefined as any}
                     onChange={(e) =>
                       setFormData((p) => ({ ...p, password: e.target.value }))
                     }
