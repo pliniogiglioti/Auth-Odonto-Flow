@@ -1,153 +1,103 @@
-import { useEffect, useMemo, useState } from "react";
-import { supabase } from "./supabaseClient";
+import { useEffect } from "react";
+import { Navigate, useLocation } from "react-router-dom";
+import { useAuth } from "@/contexts/AuthContext";
+import { useLaboratorioContext } from "@/contexts/LaboratorioContext";
 
-function stripTokenHash(urlStr: string) {
-  try {
-    const u = new URL(urlStr);
-
-    // Se vier hash com tokens, remove (evita loop/duplicação)
-    const h = (u.hash || "").toLowerCase();
-    if (h.includes("access_token=") || h.includes("refresh_token=") || h.includes("token_type=")) {
-      u.hash = "";
-    }
-
-    return u.toString();
-  } catch {
-    return urlStr;
-  }
+interface ProtectedRouteProps {
+  children: React.ReactNode;
+  requireLab?: boolean;
+  requireAdmin?: boolean; // Rota requer Administrador
 }
 
-function safeReturnTo(raw: string | null) {
-  const fallback = "https://lab.flowodonto.com.br/";
+export function ProtectedRoute({
+  children,
+  requireLab = true,
+  requireAdmin = false,
+}: ProtectedRouteProps) {
+  const { user, loading: authLoading } = useAuth();
+  const {
+    laboratorio,
+    loading: labLoading,
+    initialized,
+    permissions,
+    hasAccess,
+  } = useLaboratorioContext();
+  const location = useLocation();
 
-  if (!raw) return fallback;
+  const AUTH_HUB_URL = "https://auth.flowodonto.com.br/";
 
-  try {
-    const url = new URL(raw);
-    const host = url.hostname.toLowerCase();
-
-    // só permite redirecionar para seus domínios
-    const allowed = host === "flowodonto.com.br" || host.endsWith(".flowodonto.com.br");
-    if (!allowed) return fallback;
-
-    // remove qualquer hash com token (se alguém passar sem querer)
-    return stripTokenHash(url.toString());
-  } catch {
-    return fallback;
-  }
-}
-
-function stripHash(urlStr: string) {
-  try {
-    const u = new URL(urlStr);
-    u.hash = "";
-    return u.toString();
-  } catch {
-    return urlStr;
-  }
-}
-
-export default function App() {
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [redirecting, setRedirecting] = useState(false);
-
-  const returnTo = useMemo(() => {
-    const params = new URLSearchParams(window.location.search);
-    return safeReturnTo(params.get("returnTo"));
-  }, []);
-
-  const redirectToAppWithSession = (session: any) => {
-    if (!session) return;
-
-    // IMPORTANT: garante que NÃO vamos anexar hash em cima de hash
-    const base = stripHash(stripTokenHash(returnTo));
-
-    const hash =
-      `#access_token=${encodeURIComponent(session.access_token)}` +
-      `&refresh_token=${encodeURIComponent(session.refresh_token ?? "")}` +
-      `&token_type=bearer` +
-      `&expires_in=${encodeURIComponent(String(session.expires_in ?? 3600))}`;
-
-    setRedirecting(true);
-    window.location.replace(base + hash);
-  };
-
-  useEffect(() => {
-    let mounted = true;
-
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      if (!mounted) return;
-
-      if (data.session) {
-        redirectToAppWithSession(data.session);
-      }
-    })();
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session) {
-        redirectToAppWithSession(session);
-      }
-    });
-
-    return () => {
-      mounted = false;
-      sub.subscription.unsubscribe();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [returnTo]);
-
-  const loginGoogle = async () => {
-    setBusy(true);
-    setMsg(null);
-
-    // volta pro próprio auth com o returnTo junto (limpo)
-    const cleanReturnTo = stripTokenHash(returnTo);
-    const redirectBack = `${window.location.origin}/?returnTo=${encodeURIComponent(cleanReturnTo)}`;
-
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: redirectBack },
-    });
-
-    if (error) {
-      setMsg(error.message);
-      setBusy(false);
-    }
-  };
-
-  if (redirecting) {
-    return (
-      <div style={{ fontFamily: "Arial, sans-serif", padding: 40 }}>
-        <h1>OdontoFlow Auth</h1>
-        <p>Redirecionando...</p>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ fontFamily: "Arial, sans-serif", padding: 40 }}>
-      <h1 style={{ marginBottom: 8 }}>OdontoFlow Auth</h1>
-      <p style={{ marginTop: 0, color: "#666" }}>
-        Você vai voltar para: <b>{returnTo}</b>
-      </p>
-
-      <button
-        onClick={loginGoogle}
-        disabled={busy}
-        style={{
-          padding: "12px 16px",
-          borderRadius: 10,
-          border: "1px solid #ddd",
-          cursor: busy ? "not-allowed" : "pointer",
-          fontSize: 16,
-        }}
-      >
-        {busy ? "Abrindo Google..." : "Entrar com Google"}
-      </button>
-
-      {msg && <p style={{ color: "crimson", marginTop: 16 }}>{msg}</p>}
+  const Spinner = () => (
+    <div className="min-h-screen flex items-center justify-center">
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
     </div>
   );
+
+  function ExternalRedirect({ to }: { to: string }) {
+    useEffect(() => {
+      window.location.replace(to);
+    }, [to]);
+
+    return <Spinner />;
+  }
+
+  function WaitForSessionThenRedirect({ to }: { to: string }) {
+    useEffect(() => {
+      const t = window.setTimeout(() => {
+        window.location.replace(to);
+      }, 1200); // 1.2s para o app consumir o hash e setar user
+      return () => window.clearTimeout(t);
+    }, [to]);
+
+    return <Spinner />;
+  }
+
+  const hasIncomingTokens = () => {
+    const h = (window.location.hash || "").toLowerCase();
+    return h.includes("access_token=") || h.includes("refresh_token=") || h.includes("token_type=");
+  };
+
+  // Aguarda auth
+  if (authLoading) return <Spinner />;
+
+  // Sem usuário -> manda pro Auth Hub (login central) e volta pra URL atual do LAB
+  if (!user) {
+    const returnTo = `${window.location.origin}${location.pathname}${location.search}${location.hash}`;
+    const to = `${AUTH_HUB_URL}?returnTo=${encodeURIComponent(returnTo)}`;
+
+    // Se acabou de voltar do Auth Hub com tokens no hash, espera um pouco antes de redirecionar de novo (evita "piscar")
+    if (hasIncomingTokens()) {
+      return <WaitForSessionThenRedirect to={to} />;
+    }
+
+    return <ExternalRedirect to={to} />;
+  }
+
+  // Se NÃO requer lab (ex.: setup), não bloqueia por labLoading
+  if (!requireLab) {
+    // Se já existe lab e o usuário está no setup, manda para home
+    if (initialized && laboratorio && location.pathname === "/laboratorio/setup") {
+      return <Navigate to="/" replace />;
+    }
+    return <>{children}</>;
+  }
+
+  // Requer lab: aguarda a primeira checagem (e/ou loading)
+  if (!initialized || labLoading) return <Spinner />;
+
+  // Requer lab e não tem -> setup
+  if (!laboratorio && location.pathname !== "/laboratorio/setup") {
+    return <Navigate to="/laboratorio/setup" replace />;
+  }
+
+  // Verifica se tem acesso ao laboratório
+  if (!hasAccess) {
+    return <Navigate to="/laboratorio/setup" replace />;
+  }
+
+  // Se a rota requer admin e o usuário não tem permissão
+  if (requireAdmin && !permissions.canManageSettings) {
+    return <Navigate to="/" replace />;
+  }
+
+  return <>{children}</>;
 }
