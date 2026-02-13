@@ -112,60 +112,60 @@ function clearSupabaseStorageKeys() {
  * ========================= */
 const auth: any = (supabase as any)?.auth ?? (supabase as any);
 
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T) {
+  let t: any;
+  return Promise.race([
+    p,
+    new Promise<T>((resolve) => {
+      t = setTimeout(() => resolve(fallback), ms);
+    }),
+  ]).finally(() => clearTimeout(t));
+}
+
 async function getSessionCompat() {
-  // v2: auth.getSession()
-  if (typeof auth.getSession === "function") {
-    const res = await auth.getSession();
-    return res?.data?.session ?? null;
-  }
-  // v1: auth.session()
-  if (typeof auth.session === "function") {
-    return auth.session() ?? null;
-  }
+  try {
+    if (typeof auth.getSession === "function") {
+      const res = await withTimeout(auth.getSession(), 1500, null as any);
+      return res?.data?.session ?? null;
+    }
+    if (typeof auth.session === "function") return auth.session() ?? null;
+  } catch {}
   return null;
 }
 
 async function validateSessionServerCompat() {
-  // v2: auth.getUser() valida no servidor (mata loop de token podre)
-  if (typeof auth.getUser === "function") {
-    const { error } = await auth.getUser();
-    return !error;
-  }
-  // se não existir getUser, NÃO tenta auto-redirect no boot (mais seguro)
+  try {
+    if (typeof auth.getUser === "function") {
+      const res = await withTimeout(auth.getUser(), 1500, { error: { message: "timeout" } } as any);
+      return !res?.error;
+    }
+  } catch {}
+  // Se não dá pra validar aqui, NÃO redireciona (evita loop e evita travar)
   return false;
 }
 
 async function signOutCompat() {
-  // v2: auth.signOut({ scope })
-  if (typeof auth.signOut === "function") {
-    try {
-      await auth.signOut({ scope: "local" });
-      return;
-    } catch {
-      await auth.signOut();
-      return;
+  try {
+    if (typeof auth.signOut === "function") {
+      try {
+        await auth.signOut({ scope: "local" });
+      } catch {
+        await auth.signOut();
+      }
     }
-  }
+  } catch {}
 }
 
 async function signInPasswordCompat(email: string, password: string) {
-  // v2
-  if (typeof auth.signInWithPassword === "function") {
-    return await auth.signInWithPassword({ email, password });
-  }
-  // v1
-  if (typeof auth.signIn === "function") {
-    return await auth.signIn({ email, password });
-  }
+  if (typeof auth.signInWithPassword === "function") return await auth.signInWithPassword({ email, password });
+  if (typeof auth.signIn === "function") return await auth.signIn({ email, password });
   return { error: { message: "Método de login não disponível (supabase auth)" } };
 }
 
 async function signInOAuthCompat(provider: "google" | "facebook" | "apple", redirectTo: string) {
-  // v2
   if (typeof auth.signInWithOAuth === "function") {
     return await auth.signInWithOAuth({ provider, options: { redirectTo } });
   }
-  // v1
   if (typeof auth.signIn === "function") {
     return await auth.signIn({ provider }, { redirectTo });
   }
@@ -174,7 +174,6 @@ async function signInOAuthCompat(provider: "google" | "facebook" | "apple", redi
 
 function onAuthStateChangeCompat(cb: (event: string, session: any) => void) {
   if (typeof auth.onAuthStateChange !== "function") return () => {};
-
   const res = auth.onAuthStateChange((event: any, session: any) => cb(event, session));
   const sub = res?.data?.subscription ?? res?.subscription ?? null;
   return () => sub?.unsubscribe?.();
@@ -183,10 +182,12 @@ function onAuthStateChangeCompat(cb: (event: string, session: any) => void) {
 export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [redirecting, setRedirecting] = useState(false);
-  const [booting, setBooting] = useState(true);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // IMPORTANTE: não travar tela por boot
+  const [redirecting, setRedirecting] = useState(false);
+  const [booting, setBooting] = useState(false);
+
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [formData, setFormData] = useState({ email: "", password: "" });
 
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -209,14 +210,10 @@ export default function App() {
   }, [params, rawReturnTo]);
 
   const redirectToAppWithSession = (session: any) => {
-    if (!session) return;
-    if (redirecting) return;
+    if (!session || redirecting) return;
 
     const base = stripHash(stripTokenHash(returnTo));
-    if (isSamePage(base)) {
-      setBooting(false);
-      return;
-    }
+    if (isSamePage(base)) return;
 
     const hash =
       `#access_token=${encodeURIComponent(session.access_token)}` +
@@ -228,15 +225,12 @@ export default function App() {
     window.location.replace(base + hash);
   };
 
-  /** =========================
-   * LOGOUT
-   * ========================= */
+  /** LOGOUT */
   useEffect(() => {
     if (!isLogout) return;
 
     (async () => {
       setRedirecting(true);
-
       await signOutCompat();
       clearSupabaseStorageKeys();
 
@@ -245,9 +239,7 @@ export default function App() {
     })();
   }, [isLogout, returnTo]);
 
-  /** =========================
-   * Boot: só redireciona se validar sessão no servidor (evita loop)
-   * ========================= */
+  /** BOOT (sem travar UI) */
   useEffect(() => {
     if (isLogout) return;
 
@@ -255,41 +247,33 @@ export default function App() {
     setBooting(true);
 
     (async () => {
-      const session = await getSessionCompat();
-      if (!mounted) return;
-
-      if (session) {
-        const ok = await validateSessionServerCompat();
+      try {
+        const session = await getSessionCompat();
         if (!mounted) return;
 
-        if (ok) {
-          redirectToAppWithSession(session);
-          return;
+        if (session) {
+          const ok = await validateSessionServerCompat();
+          if (!mounted) return;
+
+          if (ok) {
+            redirectToAppWithSession(session);
+            return;
+          }
+
+          // sessão do auth tá ruim -> limpa e deixa no login
+          await signOutCompat();
+          clearSupabaseStorageKeys();
         }
-
-        // sessão do auth tá podre -> limpa e mostra login
-        await signOutCompat();
-        clearSupabaseStorageKeys();
+      } finally {
+        if (mounted) setBooting(false);
       }
-
-      setBooting(false);
     })();
 
     const unsub = onAuthStateChangeCompat(async (event, session) => {
-      // só redireciona em login/token novo
       if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
         const ok = await validateSessionServerCompat();
         if (ok && session) redirectToAppWithSession(session);
-        else {
-          await signOutCompat();
-          clearSupabaseStorageKeys();
-          setBooting(false);
-        }
         return;
-      }
-
-      if (event === "INITIAL_SESSION" || event === "SIGNED_OUT") {
-        setBooting(false);
       }
     });
 
@@ -300,9 +284,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [returnTo, isLogout]);
 
-  /** =========================
-   * OAuth
-   * ========================= */
+  /** OAuth */
   const loginOAuth = async (provider: "google" | "facebook" | "apple") => {
     setIsLoading(true);
     setErrorMsg(null);
@@ -318,9 +300,7 @@ export default function App() {
     }
   };
 
-  /** =========================
-   * Email + senha
-   * ========================= */
+  /** Email + senha */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -340,7 +320,8 @@ export default function App() {
     }
   };
 
-  if (redirecting || booting) {
+  // Se estiver redirecionando, aí sim tela de loader
+  if (redirecting) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <Loader2 className="h-6 w-6 animate-spin" />
@@ -354,6 +335,12 @@ export default function App() {
         <div className="text-center mb-8">
           <img src={logoLight} alt="OdontoFlow Lab System" className="h-14 mx-auto mb-4" />
           <p className="text-muted-foreground">Gestão de Próteses Odontológicas</p>
+          {booting && (
+            <div className="mt-2 text-xs text-muted-foreground flex items-center justify-center gap-2">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Verificando sessão…
+            </div>
+          )}
         </div>
 
         <Card className="border-0 shadow-xl">
