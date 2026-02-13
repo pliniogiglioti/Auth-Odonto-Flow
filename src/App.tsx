@@ -5,7 +5,11 @@ function stripTokenHash(urlStr: string) {
   try {
     const u = new URL(urlStr);
     const h = (u.hash || "").toLowerCase();
-    if (h.includes("access_token=") || h.includes("refresh_token=") || h.includes("token_type=")) {
+    if (
+      h.includes("access_token=") ||
+      h.includes("refresh_token=") ||
+      h.includes("token_type=")
+    ) {
       u.hash = "";
     }
     return u.toString();
@@ -15,7 +19,8 @@ function stripTokenHash(urlStr: string) {
 }
 
 function safeReturnTo(raw: string | null) {
-  const fallback = "https://lab.flowodonto.com.br/login";
+  // ✅ antes: https://lab.flowodonto.com.br/login (pode virar loop)
+  const fallback = "https://lab.flowodonto.com.br/";
   if (!raw) return fallback;
 
   try {
@@ -71,7 +76,6 @@ export default function App() {
 
     (async () => {
       setRedirecting(true);
-      // tenta deslogar de forma global (melhor pra SSO)
       try {
         await supabase.auth.signOut({ scope: "global" as any });
       } catch {
