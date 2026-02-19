@@ -34,7 +34,7 @@ function stripHash(urlStr: string) {
 }
 
 function safeReturnTo(raw: string | null) {
-  const fallback = "https://lab.flowodonto.com.br/login";
+  const fallback = "https://www.flowodonto.com.br/account";
   if (!raw) return fallback;
 
   try {
