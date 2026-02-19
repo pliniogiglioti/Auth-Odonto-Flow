@@ -236,6 +236,26 @@ async function signUpCompat(
   return { error: { message: "Método de cadastro não disponível (supabase auth)" } };
 }
 
+async function resetPasswordCompat(email: string, redirectTo: string) {
+  if (typeof auth.resetPasswordForEmail === "function") {
+    return await auth.resetPasswordForEmail(email, { redirectTo });
+  }
+  if (typeof auth.api?.resetPasswordForEmail === "function") {
+    return await auth.api.resetPasswordForEmail(email, { redirectTo });
+  }
+  return { error: { message: "Recuperação de senha não disponível" } };
+}
+
+async function updatePasswordCompat(password: string) {
+  if (typeof auth.updateUser === "function") {
+    return await auth.updateUser({ password });
+  }
+  if (typeof auth.update === "function") {
+    return await auth.update({ password });
+  }
+  return { error: { message: "Atualização de senha não disponível" } };
+}
+
 function onAuthStateChangeCompat(cb: (event: string, session: any) => void) {
   if (typeof auth.onAuthStateChange !== "function") return () => {};
   const res = auth.onAuthStateChange((event: any, session: any) => cb(event, session));
@@ -259,6 +279,8 @@ export default function App() {
   const pathname = typeof window !== "undefined" ? window.location.pathname : "/";
   const isCadastroPage = pathname === "/cadastro";
   const isCheckEmailPage = pathname === "/check-email";
+  const isRecuperarSenhaPage = pathname === "/recuperar-senha";
+  const isNovaSenhaPage = pathname === "/nova-senha";
 
   // login
   const [showPassword, setShowPassword] = useState(false);
@@ -278,6 +300,22 @@ export default function App() {
     password: "",
     confirmPassword: "",
   });
+
+  // recuperar-senha
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetSuccess, setResetSuccess] = useState(false);
+
+  // nova-senha
+  const [novaSenha, setNovaSenha] = useState("");
+  const [novaSenhaConfirm, setNovaSenhaConfirm] = useState("");
+  const [novaSenhaShowPass, setNovaSenhaShowPass] = useState(false);
+  const [novaSenhaShowConfirm, setNovaSenhaShowConfirm] = useState(false);
+  const [novaSenhaLoading, setNovaSenhaLoading] = useState(false);
+  const [novaSenhaError, setNovaSenhaError] = useState<string | null>(null);
+  const [novaSenhaSuccess, setNovaSenhaSuccess] = useState(false);
+  const [recoveryReady, setRecoveryReady] = useState(false);
 
   // IMPORTANTE: não travar tela por boot
   const [redirecting, setRedirecting] = useState(false);
@@ -335,6 +373,8 @@ export default function App() {
   /** BOOT (sem travar UI) */
   useEffect(() => {
     if (isLogout) return;
+    // Na página de nova-senha não redireciona: o usuário precisa definir a senha
+    if (isNovaSenhaPage) return;
 
     let mounted = true;
     setBooting(true);
@@ -375,7 +415,20 @@ export default function App() {
       unsub();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [returnTo, isLogout]);
+  }, [returnTo, isLogout, isNovaSenhaPage]);
+
+  /** RECOVERY — escuta evento PASSWORD_RECOVERY na página /nova-senha */
+  useEffect(() => {
+    if (!isNovaSenhaPage) return;
+
+    const unsub = onAuthStateChangeCompat((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setRecoveryReady(true);
+      }
+    });
+
+    return () => unsub();
+  }, [isNovaSenhaPage]);
 
   /** OAuth (serve pra login e cadastro) */
   const loginOAuth = async (provider: "google" | "facebook" | "apple") => {
@@ -465,6 +518,58 @@ export default function App() {
     window.location.assign(to);
   };
 
+  /** Recuperar senha — envia e-mail */
+  const handleSubmitRecuperarSenha = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetError(null);
+
+    if (!resetEmail.includes("@")) {
+      setResetError("Informe um e-mail válido");
+      return;
+    }
+
+    setResetLoading(true);
+    const redirectTo = `${window.location.origin}/nova-senha`;
+    const { error } = await resetPasswordCompat(resetEmail, redirectTo);
+    setResetLoading(false);
+
+    if (error) {
+      setResetError(error.message || "Erro ao enviar e-mail de recuperação");
+      return;
+    }
+
+    setResetSuccess(true);
+  };
+
+  /** Nova senha — salva a nova senha após recovery */
+  const handleSubmitNovaSenha = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setNovaSenhaError(null);
+
+    if (novaSenha.length < 6) {
+      setNovaSenhaError("Senha deve ter no mínimo 6 caracteres");
+      return;
+    }
+    if (novaSenha !== novaSenhaConfirm) {
+      setNovaSenhaError("As senhas não coincidem");
+      return;
+    }
+
+    setNovaSenhaLoading(true);
+    const { error } = await updatePasswordCompat(novaSenha);
+    setNovaSenhaLoading(false);
+
+    if (error) {
+      setNovaSenhaError(error.message || "Erro ao atualizar a senha");
+      return;
+    }
+
+    setNovaSenhaSuccess(true);
+    setTimeout(() => {
+      window.location.href = `/?returnTo=${encodeURIComponent(returnTo)}`;
+    }, 2500);
+  };
+
   // Se estiver redirecionando, aí sim tela de loader
   if (redirecting) {
     return (
@@ -507,6 +612,207 @@ export default function App() {
               <Button className="w-full" variant="outline" onClick={() => (window.location.href = backToLogin)}>
                 Voltar para o login
               </Button>
+            </CardContent>
+          </Card>
+
+          <p className="text-center text-xs text-muted-foreground mt-6">© 2024 OdontoFlow. Todos os direitos reservados.</p>
+        </div>
+      </div>
+    );
+  }
+
+  /** ====== RECUPERAR SENHA PAGE ====== */
+  if (isRecuperarSenhaPage) {
+    const backToLogin = `/?returnTo=${encodeURIComponent(stripTokenHash(returnTo))}`;
+
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary/10 via-background to-accent/10 p-4">
+        <div className="w-full max-w-md">
+          <div className="text-center mb-8">
+            <img src={logoLight} alt="OdontoFlow Lab System" className="h-14 mx-auto mb-4" />
+            <p className="text-muted-foreground">Gestão de Próteses Odontológicas</p>
+          </div>
+
+          <Card className="border-0 shadow-xl">
+            <CardHeader className="space-y-1 pb-4">
+              <CardTitle className="text-2xl text-center">Recuperar senha</CardTitle>
+              <CardDescription className="text-center">
+                {resetSuccess
+                  ? "Verifique sua caixa de entrada"
+                  : "Digite seu e-mail para receber o link de redefinição"}
+              </CardDescription>
+            </CardHeader>
+
+            <CardContent className="space-y-4">
+              {resetSuccess ? (
+                <>
+                  <div className="rounded-lg bg-primary/10 p-4 text-sm text-center leading-relaxed text-foreground">
+                    Enviamos um link para <span className="font-medium">{resetEmail}</span>.
+                    <br />
+                    Abra o e-mail e clique no link para criar uma nova senha.
+                  </div>
+                  <Button className="w-full" variant="outline" onClick={() => (window.location.href = backToLogin)}>
+                    Voltar para o login
+                  </Button>
+                </>
+              ) : (
+                <form onSubmit={handleSubmitRecuperarSenha} className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="resetEmail">E-mail</Label>
+                    <Input
+                      id="resetEmail"
+                      type="email"
+                      placeholder="seu@email.com"
+                      value={resetEmail}
+                      onChange={(e) => setResetEmail(e.target.value)}
+                      disabled={resetLoading}
+                      autoComplete="email"
+                      autoFocus
+                    />
+                  </div>
+
+                  {resetError && <p className="text-sm text-destructive">{resetError}</p>}
+
+                  <Button type="submit" className="w-full" size="lg" disabled={resetLoading}>
+                    {resetLoading ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Enviando...
+                      </>
+                    ) : (
+                      "Enviar link de redefinição"
+                    )}
+                  </Button>
+
+                  <div className="text-center text-sm">
+                    <a href={backToLogin} className="text-primary hover:underline">
+                      Voltar para o login
+                    </a>
+                  </div>
+                </form>
+              )}
+            </CardContent>
+          </Card>
+
+          <p className="text-center text-xs text-muted-foreground mt-6">© 2024 OdontoFlow. Todos os direitos reservados.</p>
+        </div>
+      </div>
+    );
+  }
+
+  /** ====== NOVA SENHA PAGE ====== */
+  if (isNovaSenhaPage) {
+    const backToLogin = `/?returnTo=${encodeURIComponent(stripTokenHash(returnTo))}`;
+
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary/10 via-background to-accent/10 p-4">
+        <div className="w-full max-w-md">
+          <div className="text-center mb-8">
+            <img src={logoLight} alt="OdontoFlow Lab System" className="h-14 mx-auto mb-4" />
+            <p className="text-muted-foreground">Gestão de Próteses Odontológicas</p>
+          </div>
+
+          <Card className="border-0 shadow-xl">
+            <CardHeader className="space-y-1 pb-4">
+              <CardTitle className="text-2xl text-center">Nova senha</CardTitle>
+              <CardDescription className="text-center">
+                {novaSenhaSuccess
+                  ? "Senha atualizada com sucesso!"
+                  : recoveryReady
+                  ? "Escolha uma nova senha para sua conta"
+                  : "Aguardando verificação do link…"}
+              </CardDescription>
+            </CardHeader>
+
+            <CardContent className="space-y-4">
+              {novaSenhaSuccess ? (
+                <div className="space-y-4">
+                  <div className="rounded-lg bg-primary/10 p-4 text-sm text-center leading-relaxed text-foreground">
+                    Sua senha foi atualizada. Você será redirecionado para o login em instantes.
+                  </div>
+                  <Button className="w-full" variant="outline" onClick={() => (window.location.href = backToLogin)}>
+                    Ir para o login agora
+                  </Button>
+                </div>
+              ) : !recoveryReady ? (
+                <div className="flex flex-col items-center gap-3 py-6 text-muted-foreground text-sm">
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                  <p>Validando link de recuperação…</p>
+                  <a href={backToLogin} className="text-primary hover:underline text-xs">
+                    Voltar para o login
+                  </a>
+                </div>
+              ) : (
+                <form onSubmit={handleSubmitNovaSenha} className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="novaSenha">Nova senha</Label>
+                    <div className="relative">
+                      <Input
+                        id="novaSenha"
+                        type={novaSenhaShowPass ? "text" : "password"}
+                        placeholder="••••••••"
+                        value={novaSenha}
+                        onChange={(e) => setNovaSenha(e.target.value)}
+                        disabled={novaSenhaLoading}
+                        autoComplete="new-password"
+                        autoFocus
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setNovaSenhaShowPass((p) => !p)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                        disabled={novaSenhaLoading}
+                        aria-label={novaSenhaShowPass ? "Ocultar senha" : "Mostrar senha"}
+                      >
+                        {novaSenhaShowPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="novaSenhaConfirm">Confirmar nova senha</Label>
+                    <div className="relative">
+                      <Input
+                        id="novaSenhaConfirm"
+                        type={novaSenhaShowConfirm ? "text" : "password"}
+                        placeholder="••••••••"
+                        value={novaSenhaConfirm}
+                        onChange={(e) => setNovaSenhaConfirm(e.target.value)}
+                        disabled={novaSenhaLoading}
+                        autoComplete="new-password"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setNovaSenhaShowConfirm((p) => !p)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                        disabled={novaSenhaLoading}
+                        aria-label={novaSenhaShowConfirm ? "Ocultar senha" : "Mostrar senha"}
+                      >
+                        {novaSenhaShowConfirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {novaSenhaError && <p className="text-sm text-destructive">{novaSenhaError}</p>}
+
+                  <Button type="submit" className="w-full" size="lg" disabled={novaSenhaLoading}>
+                    {novaSenhaLoading ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Salvando...
+                      </>
+                    ) : (
+                      "Salvar nova senha"
+                    )}
+                  </Button>
+
+                  <div className="text-center text-sm">
+                    <a href={backToLogin} className="text-primary hover:underline">
+                      Voltar para o login
+                    </a>
+                  </div>
+                </form>
+              )}
             </CardContent>
           </Card>
 
@@ -745,7 +1051,10 @@ export default function App() {
               </div>
 
               <div className="flex items-center justify-end">
-                <a href="https://flowodonto.com.br/recuperar-senha" className="text-sm text-primary hover:underline">
+                <a
+                  href={`/recuperar-senha?returnTo=${encodeURIComponent(stripTokenHash(returnTo))}`}
+                  className="text-sm text-primary hover:underline"
+                >
                   Esqueceu a senha?
                 </a>
               </div>
