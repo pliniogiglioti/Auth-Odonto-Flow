@@ -495,7 +495,6 @@ export default function App() {
         <div className="w-full max-w-md">
           <div className="text-center mb-8">
             <img src={logoLight} alt="OdontoFlow Lab System" className="h-14 mx-auto mb-4" />
-            <p className="text-muted-foreground">Gestão de Próteses Odontológicas</p>
             {booting && (
               <div className="mt-2 text-xs text-muted-foreground flex items-center justify-center gap-2">
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -658,7 +657,6 @@ export default function App() {
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <img src={logoLight} alt="OdontoFlow Lab System" className="h-14 mx-auto mb-4" />
-          <p className="text-muted-foreground">Gestão de Próteses Odontológicas</p>
           {booting && (
             <div className="mt-2 text-xs text-muted-foreground flex items-center justify-center gap-2">
               <Loader2 className="h-3 w-3 animate-spin" />
